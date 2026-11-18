@@ -8,14 +8,19 @@ import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import express from 'express';
 import type { Request, Response } from 'express';
 import { extractText } from 'unpdf';
-import { createServer as createViteServer } from 'vite';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const DEFAULT_DRIVE_FOLDER_ID = '126RoT_pKljrBsqS564Z9uxXE7Tq42ehf';
-const SAVED_INDEX_PATH = path.join(__dirname, 'data', 'cbs_manual_2026_index.json');
+const SAVED_INDEX_CANDIDATES = [
+  path.join(process.cwd(), 'data', 'cbs_manual_2026_index.json'),
+  path.join(__dirname, 'data', 'cbs_manual_2026_index.json'),
+  path.join(__dirname, '..', 'data', 'cbs_manual_2026_index.json'),
+  path.join(process.cwd(), 'dist', 'data', 'cbs_manual_2026_index.json'),
+  '/tmp/cbs_manual_2026_index_v1.json',
+];
 const INDEX_CACHE_PATH = '/tmp/cbs_manual_2026_index_v1.json';
 
 type SourceType = 'bundled' | 'drive';
@@ -301,35 +306,61 @@ function extractTextFromDocxBuffer(buf: Buffer): string {
   }
 }
 
-async function indexBundledManuals(): Promise<void> {
+async function resolveProjectFilePath(relativePath: string): Promise<string> {
+  const candidates = [
+    path.join(process.cwd(), relativePath),
+    path.join(__dirname, relativePath),
+    path.join(__dirname, '..', relativePath),
+  ];
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // Try next candidate
+    }
+  }
+  return candidates[0];
+}
+
+function hydrateCachedIndex(cached: {
+  docs?: IndexedDocumentMeta[];
+  pages?: Array<{
+    docId: string;
+    docName: string;
+    shortName: string;
+    sourceType: SourceType;
+    pageNumber: number;
+    text: string;
+    localPdfUrl?: string;
+  }>;
+}): boolean {
+  if (
+    cached.docs?.length === BUNDLED_MANUALS.length &&
+    cached.pages &&
+    cached.pages.length > 100
+  ) {
+    bundledDocs = cached.docs;
+    bundledPages = cached.pages.map((p) => ({
+      ...p,
+      lowerText: p.text.toLowerCase(),
+    }));
+    bundledIndexError = null;
+    return true;
+  }
+  return false;
+}
+
+async function indexBundledManuals(baseUrl?: string): Promise<void> {
   try {
-    // Load permanently saved manual index from data/ first, then /tmp cache
-    for (const cacheCandidate of [SAVED_INDEX_PATH, INDEX_CACHE_PATH]) {
+    // 1. Load permanently saved manual index from data/ candidates or /tmp cache
+    for (const cacheCandidate of SAVED_INDEX_CANDIDATES) {
       try {
         const cachedRaw = await fs.readFile(cacheCandidate, 'utf8');
-        const cached = JSON.parse(cachedRaw) as {
-          docs: IndexedDocumentMeta[];
-          pages: Array<{
-            docId: string;
-            docName: string;
-            shortName: string;
-            sourceType: SourceType;
-            pageNumber: number;
-            text: string;
-            localPdfUrl?: string;
-          }>;
-        };
-        if (
-          cached.docs?.length === BUNDLED_MANUALS.length &&
-          cached.pages?.length > 100
-        ) {
-          bundledDocs = cached.docs;
-          bundledPages = cached.pages.map((p) => ({
-            ...p,
-            lowerText: p.text.toLowerCase(),
-          }));
+        const cached = JSON.parse(cachedRaw);
+        if (hydrateCachedIndex(cached)) {
           console.log(
-            `[CBS Index] Loaded ${bundledPages.length} saved manual pages from ${path.basename(cacheCandidate)}.`,
+            `[CBS Index] Loaded ${bundledPages.length} saved manual pages from ${cacheCandidate}.`,
           );
           return;
         }
@@ -338,12 +369,37 @@ async function indexBundledManuals(): Promise<void> {
       }
     }
 
+    // 2. Fallback for serverless environments where static files are hosted on CDN
+    const fallbackOrigin =
+      baseUrl ||
+      (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '');
+    if (fallbackOrigin) {
+      try {
+        const res = await fetch(`${fallbackOrigin}/data/cbs_manual_2026_index.json`);
+        if (res.ok) {
+          const cached = await res.json();
+          if (hydrateCachedIndex(cached)) {
+            console.log(
+              `[CBS Index] Loaded ${bundledPages.length} saved manual pages from CDN (${fallbackOrigin}).`,
+            );
+            return;
+          }
+        }
+      } catch {
+        // Fall through to PDF extraction
+      }
+    }
+
+    // 3. Direct PDF extraction fallback
     const docs: IndexedDocumentMeta[] = [];
     const pages: IndexedPage[] = [];
 
     for (const spec of BUNDLED_MANUALS) {
-      const fileBytes = await fs.readFile(spec.filePath);
-      const stat = await fs.stat(spec.filePath);
+      const resolvedPdfPath = await resolveProjectFilePath(
+        `public${spec.localPdfUrl}`,
+      );
+      const fileBytes = await fs.readFile(resolvedPdfPath);
+      const stat = await fs.stat(resolvedPdfPath);
       const { totalPages, text } = await extractText(new Uint8Array(fileBytes), {
         mergePages: false,
       });
@@ -381,6 +437,7 @@ async function indexBundledManuals(): Promise<void> {
 
     bundledDocs = docs;
     bundledPages = pages;
+    bundledIndexError = null;
     console.log(
       `[CBS Index] Indexed ${bundledDocs.length} bundled PDFs (${bundledPages.length} pages).`,
     );
@@ -403,9 +460,26 @@ async function indexBundledManuals(): Promise<void> {
   }
 }
 
-function ensureBundledIndexed(): Promise<void> {
+function getRequestOrigin(req?: Request): string | undefined {
+  if (!req) return undefined;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  if (!host) return undefined;
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  return `${Array.isArray(proto) ? proto[0] : proto}://${Array.isArray(host) ? host[0] : host}`;
+}
+
+function ensureBundledIndexed(req?: Request): Promise<void> {
+  if (bundledPages.length > 0) {
+    return Promise.resolve();
+  }
   if (!bundledIndexingPromise) {
-    bundledIndexingPromise = indexBundledManuals();
+    bundledIndexingPromise = indexBundledManuals(getRequestOrigin(req)).finally(
+      () => {
+        if (bundledPages.length === 0) {
+          bundledIndexingPromise = null;
+        }
+      },
+    );
   }
   return bundledIndexingPromise;
 }
@@ -1110,27 +1184,28 @@ function buildSnippet(text: string, matchedTerms: string[]): string {
   return `${prefix}${text.slice(start, end).replace(/\s+/g, ' ').trim()}${suffix}`;
 }
 
-async function startServer() {
-  // Kick off background indexing immediately
-  ensureBundledIndexed();
+export const app = express();
+app.use(express.json({ limit: '2mb' }));
 
-  const app = express();
-  app.use(express.json({ limit: '2mb' }));
+// Serve static files from /public (includes /assets/aistudio/*.pdf)
+app.use(express.static(path.join(process.cwd(), 'public')));
+app.use(express.static(path.join(__dirname, 'public')));
 
-  // Serve static files from /public (includes /assets/aistudio/*.pdf)
-  app.use(express.static(path.join(__dirname, 'public')));
+// Kick off background indexing immediately
+ensureBundledIndexed();
 
-  app.get('/api/health', async (_req: Request, res: Response) => {
-    res.json({
-      ok: true,
-      bundledIndexed: bundledPages.length > 0,
-      bundledPageCount: bundledPages.length,
-      bundledIndexError,
-    });
+app.get('/api/health', async (req: Request, res: Response) => {
+  await ensureBundledIndexed(req);
+  res.json({
+    ok: true,
+    bundledIndexed: bundledPages.length > 0,
+    bundledPageCount: bundledPages.length,
+    bundledIndexError,
   });
+});
 
-  app.get('/api/sources', async (req: Request, res: Response) => {
-    await ensureBundledIndexed();
+app.get('/api/sources', async (req: Request, res: Response) => {
+  await ensureBundledIndexed(req);
     const resourceIds = normalizeDriveResourceIds(
       typeof req.query.folderId === 'string' ? req.query.folderId : undefined,
     );
@@ -1201,7 +1276,7 @@ async function startServer() {
   });
 
   app.get('/api/search', async (req: Request, res: Response) => {
-    await ensureBundledIndexed();
+    await ensureBundledIndexed(req);
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const resourceIds = normalizeDriveResourceIds(
       typeof req.query.folderId === 'string' ? req.query.folderId : undefined,
@@ -1252,7 +1327,7 @@ async function startServer() {
   });
 
   app.get('/api/page', async (req: Request, res: Response) => {
-    await ensureBundledIndexed();
+    await ensureBundledIndexed(req);
     const docId = typeof req.query.docId === 'string' ? req.query.docId : '';
     const pageNumber = Number(req.query.page || '1');
     const resourceIds = normalizeDriveResourceIds(
@@ -1297,7 +1372,7 @@ async function startServer() {
   });
 
   app.post('/api/ask', async (req: Request, res: Response) => {
-    await ensureBundledIndexed();
+    await ensureBundledIndexed(req);
 
     const question =
       typeof req.body?.question === 'string' ? req.body.question.trim() : '';
@@ -1319,10 +1394,15 @@ async function startServer() {
       return;
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = (
+      process.env.GEMINI_API_KEY ||
+      process.env.GOOGLE_API_KEY ||
+      ''
+    ).trim();
     if (!apiKey) {
       res.status(500).json({
-        error: 'Server Gemini API key is not configured.',
+        error:
+          'Server Gemini API key is not configured. Please add GEMINI_API_KEY in your environment variables.',
       });
       return;
     }
@@ -1431,10 +1511,12 @@ async function startServer() {
       )
       .join('\n\n');
 
-    // Set SSE response headers
+    // Set SSE response headers (including X-Accel-Buffering: no for Vercel/proxy streaming)
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
 
     const sendEvent = (event: string, payload: unknown) => {
       res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
@@ -1478,9 +1560,9 @@ async function startServer() {
       driveSyncWarning,
     });
 
-    const isTransientCapacityError = (err: unknown): boolean => {
+    const isRetryableOrFallbackError = (err: unknown): boolean => {
       const raw = err instanceof Error ? err.message : String(err);
-      return /503|429|UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded|Service Unavailable/i.test(
+      return /503|429|404|400|UNAVAILABLE|RESOURCE_EXHAUSTED|NOT_FOUND|INVALID_ARGUMENT|high demand|overloaded|Service Unavailable|not found|not supported/i.test(
         raw,
       );
     };
@@ -1543,11 +1625,15 @@ Question: ${question}`;
         { role: 'user', parts: [{ text: userPrompt }] },
       ];
 
+      const customModel = process.env.GEMINI_MODEL?.trim();
       const attempts: Array<{
         model: string;
-        thinkingLevel: ThinkingLevel;
+        thinkingLevel?: ThinkingLevel;
         delayMs: number;
       }> = [
+        ...(customModel
+          ? [{ model: customModel, delayMs: 0 }]
+          : []),
         {
           model: 'gemini-3.1-flash-lite',
           thinkingLevel: ThinkingLevel.MINIMAL,
@@ -1557,6 +1643,10 @@ Question: ${question}`;
           model: 'gemini-4-hydrogen',
           thinkingLevel: ThinkingLevel.LOW,
           delayMs: 250,
+        },
+        {
+          model: 'gemini-4-hydrogen',
+          delayMs: 350,
         },
       ];
 
@@ -1573,7 +1663,9 @@ Question: ${question}`;
             contents,
             config: {
               systemInstruction,
-              thinkingConfig: { thinkingLevel: attempt.thinkingLevel },
+              ...(attempt.thinkingLevel
+                ? { thinkingConfig: { thinkingLevel: attempt.thinkingLevel } }
+                : {}),
             },
           });
 
@@ -1587,11 +1679,11 @@ Question: ${question}`;
           break;
         } catch (attemptErr) {
           lastError = attemptErr;
-          if (fullAnswer.length > 0 || !isTransientCapacityError(attemptErr)) {
+          if (fullAnswer.length > 0 || !isRetryableOrFallbackError(attemptErr)) {
             throw attemptErr;
           }
           console.warn(
-            `[CBS Ask] Transient error on ${attempt.model}, retrying/falling back:`,
+            `[CBS Ask] Fallback triggered on ${attempt.model}:`,
             extractFriendlyErrorMessage(attemptErr),
           );
         }
@@ -1620,8 +1712,9 @@ Question: ${question}`;
     }
   });
 
-  // Vite dev middleware or production static build
+async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -1640,7 +1733,11 @@ Question: ${question}`;
   });
 }
 
-startServer().catch((err) => {
-  console.error('Fatal server startup error:', err);
-  process.exit(1);
-});
+if (!process.env.VERCEL) {
+  startServer().catch((err) => {
+    console.error('Fatal server startup error:', err);
+    process.exit(1);
+  });
+}
+
+export default app;

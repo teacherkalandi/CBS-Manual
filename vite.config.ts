@@ -25,6 +25,11 @@ export default defineConfig(() => {
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
           }
+          const dataDir = path.resolve(__dirname, 'data');
+          const distDataDir = path.resolve(distDir, 'data');
+          if (fs.existsSync(distDir) && fs.existsSync(dataDir)) {
+            fs.cpSync(dataDir, distDataDir, {recursive: true, force: true});
+          }
         },
       },
     ],
