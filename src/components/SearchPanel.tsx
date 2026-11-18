@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { BookOpen, FolderSync, Search } from 'lucide-react';
+import { searchManualFallback } from '../lib/localManualFallback';
 import type { SearchHit, SourceScope } from '../types';
 
 interface SearchPanelProps {
@@ -61,9 +62,16 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({
         throw new Error(data.error || 'Search failed.');
       }
       setResults(data.results ?? []);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Search failed.');
-      setResults([]);
+    } catch {
+      try {
+        const fallbackResults = await searchManualFallback(trimmed);
+        setResults(fallbackResults);
+      } catch (fallbackErr) {
+        setError(
+          fallbackErr instanceof Error ? fallbackErr.message : 'Search failed.',
+        );
+        setResults([]);
+      }
     } finally {
       setIsSearching(false);
     }

@@ -15,6 +15,11 @@ import { MarkdownMessage } from './components/MarkdownMessage';
 import { SearchPanel } from './components/SearchPanel';
 import { SidebarSources } from './components/SidebarSources';
 import { SourceInspectorModal } from './components/SourceInspectorModal';
+import {
+  askManualFallback,
+  getPageFallback,
+  loadStaticManualIndex,
+} from './lib/localManualFallback';
 import type {
   ChatMessage,
   Citation,
@@ -77,12 +82,23 @@ export default function App() {
   const fetchSources = useCallback(async () => {
     try {
       const res = await fetch('/api/sources');
-      if (!res.ok) return;
+      if (!res.ok) {
+        throw new Error(`Status ${res.status}`);
+      }
       const data = (await res.json()) as {
         bundledDocs?: IndexedDocumentMeta[];
       };
-      if (data.bundledDocs) {
+      if (data.bundledDocs && data.bundledDocs.length > 0) {
         setBundledDocs(data.bundledDocs);
+        return;
+      }
+    } catch {
+      // Fallback to static manual index bundled in dist/data/
+    }
+    try {
+      const { docs } = await loadStaticManualIndex();
+      if (docs.length > 0) {
+        setBundledDocs(docs);
       }
     } catch (err) {
       console.error('Failed to load sources:', err);
@@ -130,8 +146,13 @@ export default function App() {
         throw new Error(data.error || 'Could not load manual page.');
       }
       setInspectedPage({ ...data, highlightQuery });
-    } catch (err) {
-      console.error(err);
+    } catch {
+      try {
+        const fallbackPage = await getPageFallback(docId, pageNumber);
+        setInspectedPage({ ...fallbackPage, highlightQuery });
+      } catch (err) {
+        console.error(err);
+      }
     } finally {
       setIsLoadingPage(false);
     }
@@ -279,19 +300,38 @@ export default function App() {
         ),
       );
     } catch (err) {
-      const errorMsg =
-        err instanceof Error ? err.message : 'Unable to answer question.';
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsgId
-            ? {
-                ...m,
-                isStreaming: false,
-                error: errorMsg,
-              }
-            : m,
-        ),
-      );
+      // Fallback to direct client-side manual search & reference answer if /api/ask fails
+      try {
+        const fallback = await askManualFallback(question, selectedDocIds);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId
+              ? {
+                  ...m,
+                  isStreaming: false,
+                  error: undefined,
+                  content: fallback.answer,
+                  citations: fallback.citations,
+                  bundledDocsCount: fallback.bundledDocsCount,
+                }
+              : m,
+          ),
+        );
+      } catch {
+        const errorMsg =
+          err instanceof Error ? err.message : 'Unable to answer question.';
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId
+              ? {
+                  ...m,
+                  isStreaming: false,
+                  error: errorMsg,
+                }
+              : m,
+          ),
+        );
+      }
     } finally {
       setIsAsking(false);
     }
