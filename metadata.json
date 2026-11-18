@@ -1,0 +1,6 @@
+{
+  "name": "CBS Manual AI Assistant",
+  "description": "AI-powered reference assistant for the India Post POSB CBS Manual 2026 (Part I & II) and linked Google Drive manual folders, citing rules, Finacle menu codes, and procedures.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
