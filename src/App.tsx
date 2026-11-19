@@ -8,9 +8,12 @@ import {
   FileText,
   Menu,
   MessageSquare,
+  Mic,
   Plus,
   RotateCcw,
   Search,
+  Square,
+  X,
 } from 'lucide-react';
 import { MarkdownMessage } from './components/MarkdownMessage';
 import { SearchPanel } from './components/SearchPanel';
@@ -33,6 +36,7 @@ import {
   loadStaticManualIndex,
   syncDriveFolderClientFallback,
 } from './lib/localManualFallback';
+import { useSpeechDictation } from './lib/useSpeechDictation';
 import type {
   ChatMessage,
   Citation,
@@ -102,6 +106,18 @@ export default function App() {
   const [isLoadingPage, setIsLoadingPage] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  const {
+    isSupported: isSpeechSupported,
+    isListening,
+    error: speechError,
+    clearError: clearSpeechError,
+    toggleListening,
+    stopListening,
+  } = useSpeechDictation({
+    lang: 'en-IN',
+    onTranscriptChange: (text) => setInputValue(text),
+  });
 
   const fetchSources = useCallback(async (token?: string | null) => {
     try {
@@ -305,6 +321,7 @@ export default function App() {
   };
 
   const handleAsk = async (overridePrompt?: string) => {
+    stopListening();
     const question = (overridePrompt ?? inputValue).trim();
     if (!question || isAsking) return;
 
@@ -893,20 +910,89 @@ export default function App() {
                 }}
                 className="max-w-3xl mx-auto"
               >
-                <div className="flex items-end gap-2 bg-[#FAF7F2] border border-[#DED4C8] focus-within:border-[#C8102E] rounded-lg p-1.5 sm:p-2 transition-colors">
+                {speechError && (
+                  <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700">
+                    <span>{speechError}</span>
+                    <button
+                      type="button"
+                      onClick={clearSpeechError}
+                      className="p-0.5 text-red-600 hover:text-red-900 shrink-0"
+                      aria-label="Dismiss microphone notice"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                {isListening && (
+                  <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50/70 px-3 py-1.5 text-xs text-[#991B1B]">
+                    <div className="flex items-center gap-2 font-medium">
+                      <span className="w-2 h-2 rounded-full bg-[#C8102E] animate-ping" />
+                      <span>Listening... speak your question now</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={stopListening}
+                      className="text-[11px] font-semibold text-[#C8102E] hover:underline"
+                    >
+                      Stop
+                    </button>
+                  </div>
+                )}
+
+                <div
+                  className={`flex items-end gap-1.5 sm:gap-2 bg-[#FAF7F2] border rounded-lg p-1.5 sm:p-2 transition-colors ${
+                    isListening
+                      ? 'border-[#C8102E] ring-2 ring-red-100'
+                      : 'border-[#DED4C8] focus-within:border-[#C8102E]'
+                  }`}
+                >
                   <textarea
                     rows={1}
                     value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
+                    onChange={(e) => {
+                      if (speechError) clearSpeechError();
+                      setInputValue(e.target.value);
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
                         handleAsk();
                       }
                     }}
-                    placeholder="Ask about CBS Manual 2026, Finacle menus, or folder files..."
+                    placeholder={
+                      isListening
+                        ? 'Listening... speak your question'
+                        : 'Ask about CBS Manual 2026, Finacle menus, or folder files...'
+                    }
                     className="flex-1 resize-none bg-transparent text-base sm:text-sm text-slate-900 placeholder:text-slate-400 px-2 py-1.5 focus:outline-none max-h-36"
                   />
+                  <button
+                    type="button"
+                    onClick={() => toggleListening(inputValue)}
+                    disabled={isAsking || !isSpeechSupported}
+                    aria-label={
+                      isListening ? 'Stop voice dictation' : 'Dictate question with microphone'
+                    }
+                    title={
+                      !isSpeechSupported
+                        ? 'Voice dictation is not supported in this browser'
+                        : isListening
+                          ? 'Stop listening'
+                          : 'Dictate your question'
+                    }
+                    className={`h-10 w-10 sm:h-9 sm:w-9 rounded-md border inline-flex items-center justify-center transition-colors shrink-0 disabled:opacity-45 ${
+                      isListening
+                        ? 'bg-[#C8102E] border-[#C8102E] text-white hover:bg-[#991B1B]'
+                        : 'bg-white border-[#DED4C8] text-slate-700 hover:border-[#C8102E] hover:text-[#C8102E]'
+                    }`}
+                  >
+                    {isListening ? (
+                      <Square className="w-3.5 h-3.5 fill-current" />
+                    ) : (
+                      <Mic className="w-4 h-4" />
+                    )}
+                  </button>
                   <button
                     type="submit"
                     disabled={isAsking || !inputValue.trim()}
