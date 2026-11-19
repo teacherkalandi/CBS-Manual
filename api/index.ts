@@ -97,6 +97,13 @@ const driveFileContentCache = new Map<
   string,
   { meta: IndexedDocumentMeta; pages: IndexedPage[] }
 >();
+const driveUserKeyCache = new Map<string, { key: string; expiresAt: number }>();
+const inFlightDriveSyncs = new Map<
+  string,
+  Promise<{ userKey: string; state: DriveFolderState }>
+>();
+const failedModelKeys = new Set<string>();
+
 
 const answerCache = new Map<
   string,
@@ -547,23 +554,41 @@ function hashTokenForKey(token: string): string {
 }
 
 async function resolveDriveUserKey(accessToken: string): Promise<string> {
+  const tokenHash = hashTokenForKey(accessToken);
+  const cached = driveUserKeyCache.get(tokenHash);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.key;
+  }
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
     const res = await fetch(
       'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)',
       {
         headers: { Authorization: `Bearer ${accessToken}` },
+        signal: controller.signal,
       },
-    );
+    ).finally(() => clearTimeout(timer));
     if (res.ok) {
       const data = (await res.json()) as { user?: { emailAddress?: string } };
       if (data.user?.emailAddress) {
-        return data.user.emailAddress.toLowerCase();
+        const key = data.user.emailAddress.toLowerCase();
+        driveUserKeyCache.set(tokenHash, {
+          key,
+          expiresAt: Date.now() + 30 * 60 * 1000,
+        });
+        return key;
       }
     }
   } catch {
     // Fall back to token hash
   }
-  return `tok_${hashTokenForKey(accessToken)}`;
+  const fallbackKey = `tok_${tokenHash}`;
+  driveUserKeyCache.set(tokenHash, {
+    key: fallbackKey,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+  });
+  return fallbackKey;
 }
 
 interface DriveApiFile {
@@ -1116,12 +1141,12 @@ function tokenizeQuery(query: string): {
 function retrieveRelevantPages(
   query: string,
   rawCandidatePages: IndexedPage[],
-  maxPages = 22,
+  maxPages = 10,
 ): ScoredPage[] {
   const seenContentKeys = new Set<string>();
   const candidatePages: IndexedPage[] = [];
   for (const p of rawCandidatePages) {
-    const contentKey = `${p.pageNumber}:${p.lowerText.slice(0, 140)}`;
+    const contentKey = `${p.pageNumber}:${p.lowerText.slice(0, 96)}`;
     if (!seenContentKeys.has(contentKey)) {
       seenContentKeys.add(contentKey);
       candidatePages.push(p);
@@ -1152,42 +1177,42 @@ function retrieveRelevantPages(
       if (idx !== -1) {
         matchedTerms.push(term);
         let count = 0;
-        while (idx !== -1 && count < 6) {
+        while (idx !== -1 && count < 5) {
           count++;
           idx = text.indexOf(term, idx + term.length);
         }
-        score += 3 + Math.min(count, 5) * 1.2;
+        score += 3 + Math.min(count, 4) * 1.2;
         if (term.length >= 6) score += 1.5;
       }
     }
 
+    if (matchedTerms.length === 0 && refTokens.length === 0 && codeTokens.length === 0) {
+      continue;
+    }
+
     for (const phrase of phrases) {
       if (text.includes(phrase)) {
-        score += 7;
+        score += 9;
       }
     }
 
     for (const code of codeTokens) {
       if (text.includes(code)) {
-        score += 12;
+        score += 14;
       }
     }
 
     for (const ref of refTokens) {
       if (text.includes(ref)) {
-        score += 14;
+        score += 16;
       }
     }
 
     if (matchedTerms.length >= 2) {
-      score += matchedTerms.length * matchedTerms.length * 1.1;
+      score += matchedTerms.length * matchedTerms.length * 1.3;
       if (wantsMenuCode && menuCodeRegex.test(page.text)) {
-        score += 4.5;
+        score += 6;
       }
-    }
-
-    if (page.pageNumber <= 12 && matchedTerms.length >= 1) {
-      score += 1.5;
     }
 
     if (page.sourceType === 'drive' && score > 0) {
@@ -1202,27 +1227,36 @@ function retrieveRelevantPages(
   scored.sort((a, b) => b.score - a.score);
 
   const selectedMap = new Map<string, ScoredPage>();
-  const pageLookup = new Map<string, IndexedPage>();
-  for (const p of candidatePages) {
-    pageLookup.set(`${p.docId}:${p.pageNumber}`, p);
+  const topSeeds = scored.slice(0, maxPages);
+
+  // Only look up adjacent pages for top 2 seeds to keep context tight and fast
+  const neededAdjKeys = new Set<string>();
+  for (let i = 0; i < Math.min(2, topSeeds.length); i++) {
+    const p = topSeeds[i].page;
+    neededAdjKeys.add(`${p.docId}:${p.pageNumber - 1}`);
+    neededAdjKeys.add(`${p.docId}:${p.pageNumber + 1}`);
+  }
+  const adjLookup = new Map<string, IndexedPage>();
+  if (neededAdjKeys.size > 0) {
+    for (const p of candidatePages) {
+      const k = `${p.docId}:${p.pageNumber}`;
+      if (neededAdjKeys.has(k)) {
+        adjLookup.set(k, p);
+      }
+    }
   }
 
-  const topSeeds = scored.slice(0, maxPages);
   for (let i = 0; i < topSeeds.length; i++) {
     const item = topSeeds[i];
     const key = `${item.page.docId}:${item.page.pageNumber}`;
     if (!selectedMap.has(key)) {
       selectedMap.set(key, item);
     }
-    if (i < 5) {
+    if (i < 2) {
       for (const offset of [-1, 1]) {
         const adjKey = `${item.page.docId}:${item.page.pageNumber + offset}`;
-        const adjPage = pageLookup.get(adjKey);
-        if (
-          adjPage &&
-          !selectedMap.has(adjKey) &&
-          selectedMap.size < maxPages + 4
-        ) {
+        const adjPage = adjLookup.get(adjKey);
+        if (adjPage && !selectedMap.has(adjKey) && selectedMap.size < maxPages + 2) {
           selectedMap.set(adjKey, {
             page: adjPage,
             score: item.score * 0.5,
@@ -1600,9 +1634,26 @@ app.post('/api/ask', async (req: Request, res: Response) => {
         const storeKey = buildDriveStoreKey(userKey, resourceIds);
         driveState = driveFolderStore.get(storeKey) ?? null;
         if (!driveState && sourceScope !== 'bundled') {
+          let syncPromise = inFlightDriveSyncs.get(storeKey);
+          if (!syncPromise) {
+            syncPromise = syncDriveFolder(resourceIds, token).finally(() => {
+              inFlightDriveSyncs.delete(storeKey);
+            });
+            inFlightDriveSyncs.set(storeKey, syncPromise);
+          }
           try {
-            const synced = await syncDriveFolder(resourceIds, token);
-            driveState = synced.state;
+            const raceResult = await Promise.race([
+              syncPromise.then((synced) => ({ ok: true as const, state: synced.state })),
+              new Promise<{ ok: false }>((resolve) =>
+                setTimeout(() => resolve({ ok: false }), 2500),
+              ),
+            ]);
+            if (raceResult.ok) {
+              driveState = raceResult.state;
+            } else {
+              driveSyncWarning =
+                'Google Drive files are still syncing in the background; answered immediately from CBS Manual 2026.';
+            }
           } catch (syncErr) {
             driveSyncWarning =
               syncErr instanceof Error
@@ -1647,7 +1698,7 @@ app.post('/api/ask', async (req: Request, res: Response) => {
         ? `${lastUserTurn.content} ${question}`
         : question;
 
-    const topScored = retrieveRelevantPages(retrievalQuery, candidatePages, 14);
+    const topScored = retrieveRelevantPages(retrievalQuery, candidatePages, 7);
 
     const focusWindow = (
       text: string,
@@ -1664,25 +1715,23 @@ app.post('/api/ask', async (req: Request, res: Response) => {
           break;
         }
       }
-      const start = Math.max(0, bestPos - Math.floor(maxLen * 0.35));
+      const start = Math.max(0, bestPos - Math.floor(maxLen * 0.3));
       const end = Math.min(text.length, start + maxLen);
       return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`;
     };
 
     let contextChars = 0;
-    const maxContextChars = 22000;
+    const maxContextChars = 7500;
     const includedHits: Array<ScoredPage & { excerptText: string }> = [];
 
     for (let i = 0; i < topScored.length; i++) {
       const hit = topScored[i];
-      const excerptText =
-        i < 4
-          ? hit.page.text
-          : focusWindow(hit.page.text, hit.matchedTerms, 1150);
-      const blockLen = excerptText.length + 120;
+      const maxExcerpt = i < 2 ? 1550 : 850;
+      const excerptText = focusWindow(hit.page.text, hit.matchedTerms, maxExcerpt);
+      const blockLen = excerptText.length + 90;
       if (
         contextChars + blockLen > maxContextChars &&
-        includedHits.length >= 6
+        includedHits.length >= 4
       ) {
         break;
       }
@@ -1693,14 +1742,11 @@ app.post('/api/ask', async (req: Request, res: Response) => {
     const contextText = includedHits
       .map(
         (h, i) =>
-          `--- EXCERPT ${i + 1} | Document: "${h.page.shortName}" (${h.page.docName}) | Source: ${
-            h.page.sourceType === 'drive'
-              ? 'Google Drive Folder'
-              : 'Attached CBS Manual 2026'
-          } | Page/Section: ${h.page.pageNumber} ---\n${h.excerptText}`,
+          `[${i + 1}] ${h.page.shortName}, p.${h.page.pageNumber}:\n${h.excerptText}`,
       )
       .join('\n\n');
 
+    res.socket?.setNoDelay?.(true);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -1711,7 +1757,7 @@ app.post('/api/ask', async (req: Request, res: Response) => {
       res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
     };
 
-    const citations = includedHits.slice(0, 8).map((h) => ({
+    const citations = includedHits.slice(0, 6).map((h) => ({
       docId: h.page.docId,
       docName: h.page.docName,
       shortName: h.page.shortName,
@@ -1722,7 +1768,12 @@ app.post('/api/ask', async (req: Request, res: Response) => {
       localPdfUrl: h.page.localPdfUrl,
     }));
 
-    const cacheKey = `${question.toLowerCase()}|${sourceScope}|${selectedDocIds.slice().sort().join(',')}|${driveState?.syncedAt ?? 'none'}`;
+    const normalizedQ = question
+      .toLowerCase()
+      .replace(/[?!.]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const cacheKey = `${normalizedQ}|${sourceScope}|${selectedDocIds.slice().sort().join(',')}|${driveState?.syncedAt ?? 'none'}`;
     if (history.length === 0) {
       const cachedAnswer = answerCache.get(cacheKey);
       if (cachedAnswer) {
@@ -1767,17 +1818,16 @@ app.post('/api/ask', async (req: Request, res: Response) => {
     try {
       const ai = getAiClient(apiKey);
 
-      const systemInstruction = `You are the India Post CBS Manual AI Assistant for the POSB CBS Manual 2026 (Part-I & Part-II) and synced Google Drive files.
-
-Rules:
-1. Answer concisely, directly, and accurately strictly from the provided excerpts. Keep explanations crisp and practical for Post Office counter/SBCO staff.
-2. Cite sources inline as **[Document Short Name, Page X]** (with Rule/Chapter/Appendix number if shown).
-3. Put Finacle Menu Codes in backticks (e.g., \`CASBAO\`, \`CRDP\`, \`CSBCO\`) and form numbers clearly (e.g., \`SB-AOF\`, \`SB-7\`, \`SB-103\`).
-4. Separate Maker (Counter PA) and Checker (Supervisor) steps concisely, and use compact Markdown tables for thresholds/limits/fees.
-5. Never invent rules or menu codes not in the excerpts.`;
+      const systemInstruction = `You are the India Post POSB CBS Manual 2026 quick-reference assistant.
+Give fast, direct, concise answers strictly from the provided excerpts:
+- Start immediately with the direct answer (rule, Finacle menu code in backticks like \`CASBAO\`, form like \`SB-7\`, or limit).
+- Keep responses brief and scannable (bullet points, ~80-180 words) unless the user asks for full step-by-step details.
+- Cite inline as **[Document Short Name, Page X]**.
+- Separate Maker/Checker steps or add a compact table only when needed for the question.
+- Never invent menu codes or rules not present in the excerpts.`;
 
       const recentHistory = history
-        .slice(-4)
+        .slice(-2)
         .filter(
           (m: { role?: string; content?: string }) =>
             (m.role === 'user' || m.role === 'assistant') &&
@@ -1786,13 +1836,10 @@ Rules:
         )
         .map((m: { role: string; content: string }) => ({
           role: m.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: m.content.slice(0, 1500) }],
+          parts: [{ text: m.content.slice(0, 600) }],
         }));
 
-      const userPrompt = `Excerpts from POSB CBS Manual 2026 & Linked Sources:
-${contextText}
-
-Question: ${question}`;
+      const userPrompt = `Excerpts:\n${contextText}\n\nQuestion: ${question}`;
 
       const contents = [
         ...recentHistory,
@@ -1800,35 +1847,38 @@ Question: ${question}`;
       ];
 
       const customModel = process.env.GEMINI_MODEL?.trim();
-      const attempts: Array<{
+      const allAttempts: Array<{
+        key: string;
         model: string;
         thinkingLevel?: ThinkingLevel;
-        delayMs: number;
       }> = [
-        ...(customModel ? [{ model: customModel, delayMs: 0 }] : []),
+        ...(customModel
+          ? [{ key: `custom:${customModel}`, model: customModel }]
+          : []),
         {
+          key: 'flash-lite-minimal',
           model: 'gemini-3.1-flash-lite',
           thinkingLevel: ThinkingLevel.MINIMAL,
-          delayMs: 0,
         },
         {
+          key: 'hydrogen-low',
           model: 'gemini-4-hydrogen',
           thinkingLevel: ThinkingLevel.LOW,
-          delayMs: 150,
         },
         {
+          key: 'hydrogen-default',
           model: 'gemini-4-hydrogen',
-          delayMs: 250,
         },
       ];
+
+      // Skip models that previously returned permanent 400/404 errors so every question starts fast
+      const activeAttempts = allAttempts.filter((a) => !failedModelKeys.has(a.key));
+      const attemptsToRun = activeAttempts.length > 0 ? activeAttempts : allAttempts;
 
       let fullAnswer = '';
       let lastError: unknown = null;
 
-      for (const attempt of attempts) {
-        if (attempt.delayMs > 0) {
-          await new Promise((r) => setTimeout(r, attempt.delayMs));
-        }
+      for (const attempt of attemptsToRun) {
         try {
           const stream = await ai.models.generateContentStream({
             model: attempt.model,
@@ -1851,6 +1901,14 @@ Question: ${question}`;
           break;
         } catch (attemptErr) {
           lastError = attemptErr;
+          const errMsg =
+            attemptErr instanceof Error ? attemptErr.message : String(attemptErr);
+          if (
+            /\b(400|404)\b|NOT_FOUND|INVALID_ARGUMENT/i.test(errMsg) &&
+            fullAnswer.length === 0
+          ) {
+            failedModelKeys.add(attempt.key);
+          }
           if (fullAnswer.length > 0) {
             break;
           }
@@ -1858,7 +1916,6 @@ Question: ${question}`;
       }
 
       if (!fullAnswer.trim()) {
-        // Fallback to direct structured CBS Manual reference answer so the user never gets a 500 error
         if (lastError) {
           console.warn(
             '[CBS Ask] Falling back to direct manual answer after model error:',
@@ -1871,7 +1928,7 @@ Question: ${question}`;
       }
 
       if (history.length === 0 && fullAnswer.trim()) {
-        if (answerCache.size >= 120) {
+        if (answerCache.size >= 200) {
           const oldestKey = answerCache.keys().next().value;
           if (oldestKey) answerCache.delete(oldestKey);
         }

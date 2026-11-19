@@ -115,7 +115,9 @@ export async function loadStaticManualIndex(): Promise<{
           d.localPdfUrl ||
           (d.docId === 'bundled-part-1'
             ? '/assets/aistudio/POSB_CBS_Manual_2026_Part_1__1__14291118.pdf'
-            : '/assets/aistudio/POSB_CBS_Manual_2026_Part_2_bc45b28c.pdf'),
+            : d.docId === 'bundled-part-2'
+              ? '/assets/aistudio/POSB_CBS_Manual_2026_Part_2_bc45b28c.pdf'
+              : undefined),
       }));
       cachedPages = (data.pages || []).map((p) => ({
         ...p,
@@ -124,7 +126,9 @@ export async function loadStaticManualIndex(): Promise<{
           p.localPdfUrl ||
           (p.docId === 'bundled-part-1'
             ? '/assets/aistudio/POSB_CBS_Manual_2026_Part_1__1__14291118.pdf'
-            : '/assets/aistudio/POSB_CBS_Manual_2026_Part_2_bc45b28c.pdf'),
+            : p.docId === 'bundled-part-2'
+              ? '/assets/aistudio/POSB_CBS_Manual_2026_Part_2_bc45b28c.pdf'
+              : undefined),
       }));
       return { docs: cachedDocs, pages: cachedPages };
     })().catch((err) => {
@@ -157,11 +161,15 @@ function tokenizeQuery(query: string) {
 
   const refTokens: string[] = [];
   const refMatches = query.matchAll(
-    /\b(rule|chapter|appendix|annexure|form|section|sb|para)\s*[-:]?\s*([a-z0-9]+)/gi,
+    /\b(rule|chapter|appendix|annexure|form|section|sb|para|order)\s*[-:]?\s*([a-z0-9/]+)/gi,
   );
   for (const m of refMatches) {
     refTokens.push(`${m[1].toLowerCase()} ${m[2].toLowerCase()}`);
     refTokens.push(`${m[1].toLowerCase()}-${m[2].toLowerCase()}`);
+  }
+  const sbOrderMatches = query.matchAll(/\b(\d{1,2}[a-z]?\/\d{4})\b/gi);
+  for (const m of sbOrderMatches) {
+    refTokens.push(m[1].toLowerCase());
   }
 
   const phrases: string[] = [];
@@ -258,13 +266,26 @@ function scorePages(
       score += 1.5;
     }
 
+    if (page.docId === 'bundled-sb-orders' && score > 0) {
+      score *= 1.18;
+    }
+
     if (score > 0) {
       scored.push({ page, score, matchedTerms });
     }
   }
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, maxPages);
+  const top = scored.slice(0, maxPages);
+  const hasSbOrder = top.some((h) => h.page.docId === 'bundled-sb-orders');
+  if (!hasSbOrder) {
+    const firstSb = scored.find((h) => h.page.docId === 'bundled-sb-orders');
+    if (firstSb) {
+      top.pop();
+      top.push(firstSb);
+    }
+  }
+  return top;
 }
 
 export async function searchManualFallback(
@@ -327,7 +348,7 @@ export function formatDirectManualAnswer(
   }>,
 ): string {
   if (scoredHits.length === 0) {
-    return 'No matching sections were found in POSB CBS Manual 2026 (Part-I & Part-II) for this query. Try searching by Finacle menu code (e.g., `CASBAO`, `CRDP`), scheme name (`SB`, `RD`, `TD`, `MIS`, `SCSS`, `PPF`, `SSA`, `MSSC`), or rule number.';
+    return 'No matching sections were found in POSB CBS Manual 2026 (Part-I & Part-II) or Notes on SB Orders (2016–2025) for this query. Try searching by Finacle menu code (e.g., `CASBAO`, `CRDP`), SB Order number (e.g., `06/2025`), scheme name (`SB`, `RD`, `TD`, `MIS`, `SCSS`, `PPF`, `SSA`, `MSSC`), or rule number.';
   }
 
   const topHits = scoredHits.slice(0, 5);

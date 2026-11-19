@@ -17,6 +17,8 @@ const QUICK_CODES = [
   'CSBCO',
   'SB-103',
   '194N',
+  '06/2025',
+  'e-KYC',
   'MSSC',
   'Deceased Claim',
   'IPOS0000DOP',
@@ -86,7 +88,7 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({
               Keyword &amp; Finacle Menu Code Lookup
             </h2>
             <p className="text-xs text-slate-600 mt-0.5">
-              Search directly across all 748 pages of POSB CBS Manual 2026 (Part I &amp; II).
+              Search directly across POSB CBS Manual 2026 (Part I &amp; II) and Notes on SB Orders (2016–2025).
             </p>
           </div>
 

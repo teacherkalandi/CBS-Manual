@@ -26,6 +26,8 @@ export const SourceInspectorModal: React.FC<SourceInspectorModalProps> = ({
   if (!page) return null;
 
   const canShowPdf = Boolean(page.localPdfUrl);
+  const effectiveViewMode = canShowPdf ? viewMode : 'text';
+  const isSbOrders = page.docId === 'bundled-sb-orders';
   const pdfSrc = page.localPdfUrl
     ? `${page.localPdfUrl}#page=${page.pageNumber}`
     : undefined;
@@ -53,11 +55,15 @@ export const SourceInspectorModal: React.FC<SourceInspectorModalProps> = ({
                 <span>
                   {page.sourceType === 'drive'
                     ? 'Google Drive Source'
-                    : 'Saved CBS Manual 2026'}
+                    : isSbOrders
+                      ? 'Saved SB Order Notes (2016–2025)'
+                      : 'Saved CBS Manual 2026'}
                 </span>
                 <span>·</span>
                 <span className="font-medium text-white">
-                  Page {page.pageNumber}
+                  {isSbOrders
+                    ? `Year ${2015 + page.pageNumber} (Page ${page.pageNumber})`
+                    : `Page ${page.pageNumber}`}
                 </span>
               </div>
             </div>
@@ -160,7 +166,7 @@ export const SourceInspectorModal: React.FC<SourceInspectorModalProps> = ({
 
         {/* Body */}
         <div className="flex-1 overflow-hidden bg-[#FAF9F6]">
-          {viewMode === 'pdf' && pdfSrc ? (
+          {effectiveViewMode === 'pdf' && pdfSrc ? (
             <iframe
               key={pdfSrc}
               src={pdfSrc}

@@ -34,6 +34,7 @@ interface SidebarSourcesProps {
   onGoogleSignIn: () => void;
   onSignOut: () => void;
   onSyncDrive: () => void;
+  onInspectDoc?: (docId: string, pageNumber: number) => void;
   onCloseMobile?: () => void;
 }
 
@@ -59,6 +60,7 @@ export const SidebarSources: React.FC<SidebarSourcesProps> = ({
   onGoogleSignIn,
   onSignOut,
   onSyncDrive,
+  onInspectDoc,
   onCloseMobile,
 }) => {
   return (
@@ -93,7 +95,7 @@ export const SidebarSources: React.FC<SidebarSourcesProps> = ({
             </button>
           )}
         </div>
-        <div className="grid grid-cols-3 gap-1 bg-[#E9E1D6] p-0.5 rounded-md">
+        <div className="grid grid-cols-2 gap-1 bg-[#E9E1D6] p-0.5 rounded-md">
           <button
             type="button"
             onClick={onClearDocSelection}
@@ -106,7 +108,13 @@ export const SidebarSources: React.FC<SidebarSourcesProps> = ({
             All Files
           </button>
           {bundledDocs.map((doc) => {
-            const label = doc.docId.includes('part-1') ? 'Part I' : 'Part II';
+            const label = doc.docId.includes('part-1')
+              ? 'Part I'
+              : doc.docId.includes('part-2')
+                ? 'Part II'
+                : doc.docId.includes('sb-orders')
+                  ? 'SB Orders'
+                  : doc.shortName;
             const active =
               selectedDocIds.length === 1 && selectedDocIds[0] === doc.docId;
             return (
@@ -120,7 +128,7 @@ export const SidebarSources: React.FC<SidebarSourcesProps> = ({
                     onSelectSingleDoc(doc.docId);
                   }
                 }}
-                className={`py-2 sm:py-1.5 px-2 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                className={`py-2 sm:py-1.5 px-2 text-xs font-medium rounded transition-colors whitespace-nowrap truncate ${
                   active
                     ? 'bg-[#C8102E] text-white shadow-xs'
                     : 'text-slate-700 hover:text-slate-950'
@@ -135,19 +143,22 @@ export const SidebarSources: React.FC<SidebarSourcesProps> = ({
 
       {/* Scrollable Manuals & Google Drive Folder List */}
       <div className="flex-1 overflow-y-auto p-3.5 space-y-5">
-        {/* 1. POSB CBS Manual 2026 (Part I & Part II) */}
+        {/* 1. All Saved Reference Files (CBS Manual Part I & II + Notes on SB Orders) */}
         <section className="space-y-2.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
               <BookOpen className="w-3.5 h-3.5 text-[#C8102E] shrink-0" />
-              <span>POSB CBS Manual 2026</span>
+              <span>All Files</span>
             </div>
+            <span className="text-[11px] text-slate-500 tabular-nums">
+              {bundledDocs.length} saved
+            </span>
           </div>
 
           <div className="space-y-2.5">
             {bundledDocs.length === 0 ? (
               <div className="bg-white border border-[#E2DFD7] rounded-md p-2.5 text-xs text-slate-500">
-                Loading Part I &amp; Part II manuals...
+                Loading CBS Manual &amp; SB Order files...
               </div>
             ) : (
               bundledDocs.map((doc) => {
@@ -186,23 +197,35 @@ export const SidebarSources: React.FC<SidebarSourcesProps> = ({
 
                     <div className="flex items-center justify-between pt-1.5 border-t border-[#F0EDE6] text-[11px] text-slate-500 tabular-nums">
                       <span>
-                        {doc.pageCount} pages · {formatFileSize(doc.sizeBytes)}
+                        {doc.docId === 'bundled-sb-orders'
+                          ? `${doc.pageCount} years · ${formatFileSize(doc.sizeBytes)}`
+                          : `${doc.pageCount} pages · ${formatFileSize(doc.sizeBytes)}`}
                       </span>
-                      <a
-                        href={
-                          doc.localPdfUrl ||
-                          MANUAL_PDF_URLS[doc.docId] ||
-                          MANUAL_PDF_URLS['bundled-part-1']
-                        }
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        onClick={() => onCloseMobile?.()}
-                        className="inline-flex items-center gap-1 font-medium text-red-700 hover:text-red-800 whitespace-nowrap"
-                      >
-                        <FileText className="w-3 h-3" />
-                        <span>View PDF</span>
-                        <ExternalLink className="w-2.5 h-2.5" />
-                      </a>
+                      {doc.localPdfUrl || MANUAL_PDF_URLS[doc.docId] ? (
+                        <a
+                          href={doc.localPdfUrl || MANUAL_PDF_URLS[doc.docId]}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => onCloseMobile?.()}
+                          className="inline-flex items-center gap-1 font-medium text-red-700 hover:text-red-800 whitespace-nowrap"
+                        >
+                          <FileText className="w-3 h-3" />
+                          <span>View PDF</span>
+                          <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onInspectDoc?.(doc.docId, 1);
+                            onCloseMobile?.();
+                          }}
+                          className="inline-flex items-center gap-1 font-medium text-red-700 hover:text-red-800 whitespace-nowrap"
+                        >
+                          <FileText className="w-3 h-3" />
+                          <span>View Notes</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 );

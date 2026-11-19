@@ -216,8 +216,10 @@ export default function App() {
   }, [bundledDocs.length, fetchSources, accessToken]);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    chatEndRef.current?.scrollIntoView({
+      behavior: isAsking ? 'auto' : 'smooth',
+    });
+  }, [messages, isAsking]);
 
   useEffect(() => {
     if (!isReadingMode) return;
@@ -335,8 +337,8 @@ export default function App() {
 
     const historyPayload = messages
       .filter((m) => !m.error && m.content.trim().length > 0)
-      .slice(-6)
-      .map((m) => ({ role: m.role, content: m.content }));
+      .slice(-2)
+      .map((m) => ({ role: m.role, content: m.content.slice(0, 600) }));
 
     setMessages((prev) => [
       ...prev,
