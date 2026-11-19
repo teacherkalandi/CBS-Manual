@@ -6,9 +6,12 @@ import {
   Copy,
   FileDown,
   FileText,
+  Loader2,
+  Maximize2,
   Menu,
   MessageSquare,
   Mic,
+  Minimize2,
   Plus,
   RotateCcw,
   Search,
@@ -47,39 +50,6 @@ import type {
 
 const DEFAULT_FOLDER_ID = '126RoT_pKljrBsqS564Z9uxXE7Tq42ehf';
 
-const STARTER_PROMPTS = [
-  {
-    title: 'Account Opening & e-KYC',
-    prompt:
-      'What are the Finacle menus and KYC/CIF rules for opening a new Savings Account (SB) and Joint-B account?',
-  },
-  {
-    title: 'Deceased Claim Settlement',
-    prompt:
-      'Explain the step-by-step Finacle procedure, documents, and sanction limits for Deceased Claim cases (with and without nomination).',
-  },
-  {
-    title: 'TDS Rules (194A / 194N / 194H)',
-    prompt:
-      'Summarize TDS deduction thresholds, PAN validation rules, and Finacle procedures under Sections 194A, 194EE, 194H, and 194N.',
-  },
-  {
-    title: 'Mahila Samman (MSSC) & SCSS',
-    prompt:
-      'What are the deposit limits, tenure, premature closure penalties, and Finacle menus for MSSC 2023 and Senior Citizens Savings Scheme?',
-  },
-  {
-    title: 'SBCO Daily Checks & Objections',
-    prompt:
-      'List the SBCO daily verification checks, vouchers/registers to examine, and how SBCO objection memos are raised and settled.',
-  },
-  {
-    title: 'RD / TD Premature Closure & Revival',
-    prompt:
-      'Explain the procedure and Finacle menu codes for RD default fee, revival of discontinued RD account, and premature TD closure.',
-  },
-];
-
 export default function App() {
   const [bundledDocs, setBundledDocs] = useState<IndexedDocumentMeta[]>([]);
   const [driveFolder, setDriveFolder] = useState<DriveFolderInfo | null>(null);
@@ -93,6 +63,7 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<'assistant' | 'search'>('assistant');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [isReadingMode, setIsReadingMode] = useState(false);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
@@ -106,6 +77,14 @@ export default function App() {
   const [isLoadingPage, setIsLoadingPage] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [inputValue]);
 
   const {
     isSupported: isSpeechSupported,
@@ -239,6 +218,28 @@ export default function App() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    if (!isReadingMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !inspectedPage) {
+        setIsReadingMode(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isReadingMode, inspectedPage]);
+
+  const toggleReadingMode = () => {
+    setIsReadingMode((prev) => {
+      const next = !prev;
+      if (next) {
+        setActiveTab('assistant');
+        setMobileSidebarOpen(false);
+      }
+      return next;
+    });
+  };
 
   const handleGoogleSignIn = async () => {
     setIsSigningIn(true);
@@ -506,27 +507,29 @@ export default function App() {
   return (
     <div className="h-dvh w-full overflow-hidden flex bg-[#FAF7F2] text-slate-900">
       {/* Desktop Sidebar */}
-      <div className="hidden lg:block w-[290px] shrink-0 h-full">
-        <SidebarSources
-          bundledDocs={bundledDocs}
-          driveFolder={driveFolder}
-          selectedDocIds={selectedDocIds}
-          onToggleDocSelection={handleToggleDocSelection}
-          onSelectSingleDoc={(docId) => setSelectedDocIds([docId])}
-          onClearDocSelection={() => setSelectedDocIds([])}
-          userEmail={userEmail}
-          hasDriveToken={Boolean(accessToken)}
-          isSigningIn={isSigningIn}
-          isSyncingDrive={isSyncingDrive}
-          driveError={driveError}
-          onGoogleSignIn={handleGoogleSignIn}
-          onSignOut={handleSignOut}
-          onSyncDrive={() => accessToken && syncDriveFiles(accessToken)}
-        />
-      </div>
+      {!isReadingMode && (
+        <div className="hidden lg:block w-[290px] shrink-0 h-full">
+          <SidebarSources
+            bundledDocs={bundledDocs}
+            driveFolder={driveFolder}
+            selectedDocIds={selectedDocIds}
+            onToggleDocSelection={handleToggleDocSelection}
+            onSelectSingleDoc={(docId) => setSelectedDocIds([docId])}
+            onClearDocSelection={() => setSelectedDocIds([])}
+            userEmail={userEmail}
+            hasDriveToken={Boolean(accessToken)}
+            isSigningIn={isSigningIn}
+            isSyncingDrive={isSyncingDrive}
+            driveError={driveError}
+            onGoogleSignIn={handleGoogleSignIn}
+            onSignOut={handleSignOut}
+            onSyncDrive={() => accessToken && syncDriveFiles(accessToken)}
+          />
+        </div>
+      )}
 
       {/* Mobile Sidebar Drawer */}
-      {mobileSidebarOpen && (
+      {!isReadingMode && mobileSidebarOpen && (
         <div
           className="fixed inset-0 z-40 lg:hidden flex bg-slate-950/50 backdrop-blur-[1px]"
           onClick={() => setMobileSidebarOpen(false)}
@@ -561,14 +564,16 @@ export default function App() {
         {/* India Post Crimson Top Bar + Dak Golden Yellow Accent */}
         <header className="shrink-0 bg-[#B91C1C] text-white border-b-[3px] border-[#FFCD00] px-3 sm:px-6 h-14 flex items-center justify-between gap-2 sm:gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
-            <button
-              type="button"
-              onClick={() => setMobileSidebarOpen(true)}
-              className="lg:hidden h-9 w-9 inline-flex items-center justify-center rounded-md bg-[#991B1B] border border-[#DC2626] text-white hover:bg-[#7F1D1D] shrink-0"
-              aria-label="Open manual sources"
-            >
-              <Menu className="w-4 h-4" />
-            </button>
+            {!isReadingMode && (
+              <button
+                type="button"
+                onClick={() => setMobileSidebarOpen(true)}
+                className="lg:hidden h-9 w-9 inline-flex items-center justify-center rounded-md bg-[#991B1B] border border-[#DC2626] text-white hover:bg-[#7F1D1D] shrink-0"
+                aria-label="Open manual sources"
+              >
+                <Menu className="w-4 h-4" />
+              </button>
+            )}
 
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-8 h-8 rounded bg-[#FFCD00] text-[#8B0000] flex items-center justify-center shrink-0">
@@ -580,46 +585,81 @@ export default function App() {
                   <span className="hidden sm:inline">CBS Manual AI Assistant</span>
                 </h1>
                 <p className="text-[11px] text-red-100 truncate tabular-nums hidden sm:block">
-                  India Post POSB 2026 · {totalBundledPages || 748} pages
-                  {driveDocsCount > 0
-                    ? ` + ${driveDocsCount} folder file${driveDocsCount === 1 ? '' : 's'} synced`
-                    : ' saved & ready'}
+                  {isReadingMode
+                    ? 'Full-Screen Reading Mode · Press Esc to exit'
+                    : `India Post POSB 2026 · ${totalBundledPages || 748} pages${
+                        driveDocsCount > 0
+                          ? ` + ${driveDocsCount} folder file${driveDocsCount === 1 ? '' : 's'} synced`
+                          : ' saved & ready'
+                      }`}
                 </p>
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            <div className="flex items-center bg-[#991B1B] p-0.5 rounded-md border border-[#DC2626]">
-              <button
-                type="button"
-                onClick={() => setActiveTab('assistant')}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 sm:py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  activeTab === 'assistant'
-                    ? 'bg-white text-[#991B1B] shadow-xs'
-                    : 'text-red-100 hover:text-white'
-                }`}
-              >
-                <MessageSquare className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Assistant</span>
-                <span className="sm:hidden">Ask</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('search')}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 sm:py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  activeTab === 'search'
-                    ? 'bg-white text-[#991B1B] shadow-xs'
-                    : 'text-red-100 hover:text-white'
-                }`}
-              >
-                <Search className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Manual Lookup</span>
-                <span className="sm:hidden">Lookup</span>
-              </button>
-            </div>
+            {!isReadingMode && (
+              <div className="flex items-center bg-[#991B1B] p-0.5 rounded-md border border-[#DC2626]">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('assistant')}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 sm:py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                    activeTab === 'assistant'
+                      ? 'bg-white text-[#991B1B] shadow-xs'
+                      : 'text-red-100 hover:text-white'
+                  }`}
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Assistant</span>
+                  <span className="sm:hidden">Ask</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('search')}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 sm:py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                    activeTab === 'search'
+                      ? 'bg-white text-[#991B1B] shadow-xs'
+                      : 'text-red-100 hover:text-white'
+                  }`}
+                >
+                  <Search className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Manual Lookup</span>
+                  <span className="sm:hidden">Lookup</span>
+                </button>
+              </div>
+            )}
 
-            {messages.length > 0 && activeTab === 'assistant' && (
+            {activeTab === 'assistant' && (
+              <button
+                type="button"
+                onClick={toggleReadingMode}
+                title={
+                  isReadingMode
+                    ? 'Exit full-screen Reading Mode (Esc)'
+                    : 'Expand to full-screen Reading Mode'
+                }
+                aria-pressed={isReadingMode}
+                className={`h-9 sm:h-8 inline-flex items-center gap-1.5 px-2.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  isReadingMode
+                    ? 'bg-[#FFCD00] hover:bg-[#FACC15] text-[#8B0000] font-semibold'
+                    : 'bg-[#991B1B] hover:bg-[#7F1D1D] border border-[#DC2626] text-white'
+                }`}
+              >
+                {isReadingMode ? (
+                  <>
+                    <Minimize2 className="w-3.5 h-3.5" />
+                    <span>Exit Reading</span>
+                  </>
+                ) : (
+                  <>
+                    <Maximize2 className="w-3.5 h-3.5" />
+                    <span className="hidden md:inline">Reading Mode</span>
+                  </>
+                )}
+              </button>
+            )}
+
+            {!isReadingMode && messages.length > 0 && activeTab === 'assistant' && (
               <button
                 type="button"
                 onClick={() => setMessages([])}
@@ -648,10 +688,20 @@ export default function App() {
         ) : (
           <div className="flex-1 flex flex-col min-h-0">
             {/* Scrollable Chat Viewport */}
-            <div className="flex-1 overflow-y-auto px-3 sm:px-8 py-4 sm:py-6">
-              <div className="max-w-3xl mx-auto">
+            <div
+              className={`flex-1 overflow-y-auto transition-all ${
+                isReadingMode
+                  ? 'px-3 sm:px-10 py-5 sm:py-8'
+                  : 'px-3 sm:px-8 py-4 sm:py-6'
+              }`}
+            >
+              <div
+                className={`mx-auto transition-all ${
+                  isReadingMode ? 'max-w-5xl w-full' : 'max-w-3xl'
+                }`}
+              >
                 {messages.length === 0 ? (
-                  <div className="space-y-5 sm:space-y-6 py-2 sm:py-4">
+                  <div className="space-y-4 py-4 sm:py-8">
                     {/* Hero Intro */}
                     <div className="space-y-2">
                       <div className="text-[11px] font-semibold uppercase tracking-wider text-[#C8102E]">
@@ -663,30 +713,6 @@ export default function App() {
                       <p className="text-sm text-slate-600 leading-relaxed max-w-2xl">
                         All 748 pages of POSB CBS Manual 2026 Part I (Chapters 1–22) and Part II (Appendices I–XXIX) are permanently saved inside this tool. Open the menu to <strong>Login to Google</strong> and search across every file in your linked folder.
                       </p>
-                    </div>
-
-                    {/* Quick Starter Prompts */}
-                    <div className="space-y-2.5">
-                      <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                        Common Counter &amp; SBCO Queries
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        {STARTER_PROMPTS.map((item) => (
-                          <button
-                            key={item.title}
-                            type="button"
-                            onClick={() => handleAsk(item.prompt)}
-                            className="text-left bg-white hover:bg-[#FFFDF7] border border-[#E8DFD5] hover:border-[#C8102E] rounded-lg p-3.5 transition-colors group"
-                          >
-                            <div className="text-[13px] sm:text-xs font-semibold text-slate-900 group-hover:text-[#C8102E] transition-colors">
-                              {item.title}
-                            </div>
-                            <div className="text-xs text-slate-600 mt-1 line-clamp-2 leading-relaxed">
-                              {item.prompt}
-                            </div>
-                          </button>
-                        ))}
-                      </div>
                     </div>
                   </div>
                 ) : (
@@ -707,7 +733,11 @@ export default function App() {
                             </div>
                           </div>
                         ) : (
-                          <div className="bg-white border border-[#E8DFD5] rounded-lg p-3.5 sm:p-5 space-y-4 min-w-0">
+                          <div
+                            className={`bg-white border border-[#E8DFD5] rounded-lg space-y-4 min-w-0 transition-all ${
+                              isReadingMode ? 'p-4 sm:p-7 shadow-xs' : 'p-3.5 sm:p-5'
+                            }`}
+                          >
                             <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#F2EAE0]">
                               <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
                                 <BookOpen className="w-3.5 h-3.5 text-[#C8102E]" />
@@ -715,6 +745,33 @@ export default function App() {
                               </div>
                               {!msg.isStreaming && msg.content && (
                                 <div className="flex flex-wrap items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={toggleReadingMode}
+                                    className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-medium transition-colors whitespace-nowrap ${
+                                      isReadingMode
+                                        ? 'border-amber-300 bg-[#FFF8DB] text-[#854D0E] hover:bg-amber-100'
+                                        : 'border-[#E2D8CB] bg-[#FAF7F2] text-slate-700 hover:border-[#C8102E] hover:text-[#991B1B]'
+                                    }`}
+                                    title={
+                                      isReadingMode
+                                        ? 'Exit full-screen Reading Mode'
+                                        : 'Open full-screen Reading Mode'
+                                    }
+                                  >
+                                    {isReadingMode ? (
+                                      <>
+                                        <Minimize2 className="w-3.5 h-3.5" />
+                                        <span>Exit Focus</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Maximize2 className="w-3.5 h-3.5" />
+                                        <span className="hidden sm:inline">Reading Mode</span>
+                                        <span className="sm:hidden">Focus</span>
+                                      </>
+                                    )}
+                                  </button>
                                   <button
                                     type="button"
                                     onClick={() =>
@@ -839,7 +896,10 @@ export default function App() {
                                 </button>
                               </div>
                             ) : msg.content ? (
-                              <MarkdownMessage content={msg.content} />
+                              <MarkdownMessage
+                                content={msg.content}
+                                readingMode={isReadingMode}
+                              />
                             ) : (
                               <div className="space-y-2 py-1">
                                 <div className="text-xs font-medium text-[#C8102E]">
@@ -858,7 +918,11 @@ export default function App() {
                                 <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                                   Referenced Pages &amp; Sources
                                 </div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <div
+                                  className={`grid grid-cols-1 sm:grid-cols-2 gap-2 ${
+                                    isReadingMode ? 'lg:grid-cols-3' : ''
+                                  }`}
+                                >
                                   {msg.citations.slice(0, 8).map((cit) => (
                                     <button
                                       key={`${cit.docId}-${cit.pageNumber}`}
@@ -902,13 +966,19 @@ export default function App() {
             </div>
 
             {/* Bottom Composer */}
-            <div className="shrink-0 bg-white border-t border-[#E8DFD5] px-3 sm:px-8 pt-2.5 pb-2">
+            <div
+              className={`shrink-0 bg-white border-t border-[#E8DFD5] pt-2.5 pb-2 ${
+                isReadingMode ? 'px-3 sm:px-10' : 'px-3 sm:px-8'
+              }`}
+            >
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
                   handleAsk();
                 }}
-                className="max-w-3xl mx-auto"
+                className={`mx-auto transition-all ${
+                  isReadingMode ? 'max-w-5xl w-full' : 'max-w-3xl'
+                }`}
               >
                 {speechError && (
                   <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700">
@@ -941,13 +1011,14 @@ export default function App() {
                 )}
 
                 <div
-                  className={`flex items-end gap-1.5 sm:gap-2 bg-[#FAF7F2] border rounded-lg p-1.5 sm:p-2 transition-colors ${
+                  className={`flex items-end gap-1 sm:gap-1.5 bg-[#FAF7F2] border rounded-lg p-1.5 transition-colors ${
                     isListening
                       ? 'border-[#C8102E] ring-2 ring-red-100'
                       : 'border-[#DED4C8] focus-within:border-[#C8102E]'
                   }`}
                 >
                   <textarea
+                    ref={textareaRef}
                     rows={1}
                     value={inputValue}
                     onChange={(e) => {
@@ -965,7 +1036,7 @@ export default function App() {
                         ? 'Listening... speak your question'
                         : 'Ask about CBS Manual 2026, Finacle menus, or folder files...'
                     }
-                    className="flex-1 resize-none bg-transparent text-base sm:text-sm text-slate-900 placeholder:text-slate-400 px-2 py-1.5 focus:outline-none max-h-36"
+                    className="flex-1 min-w-0 resize-none bg-transparent text-base sm:text-sm text-slate-900 placeholder:text-slate-400 px-2 py-1 focus:outline-none max-h-40 leading-snug"
                   />
                   <button
                     type="button"
@@ -981,25 +1052,30 @@ export default function App() {
                           ? 'Stop listening'
                           : 'Dictate your question'
                     }
-                    className={`h-10 w-10 sm:h-9 sm:w-9 rounded-md border inline-flex items-center justify-center transition-colors shrink-0 disabled:opacity-45 ${
+                    className={`h-8 w-8 rounded-md border inline-flex items-center justify-center transition-colors shrink-0 disabled:opacity-45 ${
                       isListening
                         ? 'bg-[#C8102E] border-[#C8102E] text-white hover:bg-[#991B1B]'
                         : 'bg-white border-[#DED4C8] text-slate-700 hover:border-[#C8102E] hover:text-[#C8102E]'
                     }`}
                   >
                     {isListening ? (
-                      <Square className="w-3.5 h-3.5 fill-current" />
+                      <Square className="w-3 h-3 fill-current" />
                     ) : (
-                      <Mic className="w-4 h-4" />
+                      <Mic className="w-3.5 h-3.5" />
                     )}
                   </button>
                   <button
                     type="submit"
                     disabled={isAsking || !inputValue.trim()}
-                    className="h-10 sm:h-9 px-3.5 rounded-md bg-[#C8102E] hover:bg-[#991B1B] disabled:opacity-45 text-white inline-flex items-center gap-1.5 text-xs font-medium transition-colors shrink-0 whitespace-nowrap"
+                    aria-label={isAsking ? 'Generating answer' : 'Ask question'}
+                    title={isAsking ? 'Reading...' : 'Ask'}
+                    className="h-8 w-8 rounded-md bg-[#C8102E] hover:bg-[#991B1B] disabled:opacity-45 text-white inline-flex items-center justify-center transition-colors shrink-0"
                   >
-                    <span>{isAsking ? 'Reading...' : 'Ask'}</span>
-                    <ArrowUp className="w-3.5 h-3.5" />
+                    {isAsking ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <ArrowUp className="w-4 h-4" />
+                    )}
                   </button>
                 </div>
                 <div className="flex items-center justify-between mt-1.5 px-1 text-[11px] text-slate-500 tabular-nums">

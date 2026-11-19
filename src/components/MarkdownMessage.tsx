@@ -4,11 +4,21 @@ import remarkGfm from 'remark-gfm';
 
 interface MarkdownMessageProps {
   content: string;
+  readingMode?: boolean;
 }
 
-export const MarkdownMessage: React.FC<MarkdownMessageProps> = ({ content }) => {
+export const MarkdownMessage: React.FC<MarkdownMessageProps> = ({
+  content,
+  readingMode = false,
+}) => {
   return (
-    <div className="cbs-markdown min-w-0 break-words text-[14.5px] leading-[1.65] text-slate-800 space-y-3">
+    <div
+      className={`cbs-markdown min-w-0 break-words text-slate-800 ${
+        readingMode
+          ? 'text-[15.5px] sm:text-[16px] leading-[1.8] space-y-3.5'
+          : 'text-[14.5px] leading-[1.65] space-y-3'
+      }`}
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
