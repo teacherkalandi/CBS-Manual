@@ -761,6 +761,55 @@ async function fetchAndIndexDriveFile(
     }
 
     if (file.mimeType === 'application/pdf') {
+      const lowerName = file.name.toLowerCase();
+      const matchedBundledId =
+        sizeBytes === 6028085 ||
+        (lowerName.includes('cbs') &&
+          lowerName.includes('manual') &&
+          /part[\s_-]*1\b|part[\s_-]*i\b/.test(lowerName))
+          ? 'bundled-part-1'
+          : sizeBytes === 14312184 ||
+              (lowerName.includes('cbs') &&
+                lowerName.includes('manual') &&
+                /part[\s_-]*2\b|part[\s_-]*ii\b/.test(lowerName))
+            ? 'bundled-part-2'
+            : null;
+
+      if (matchedBundledId && bundledPages.length > 0) {
+        const templatePages = bundledPages.filter(
+          (p) => p.docId === matchedBundledId,
+        );
+        if (templatePages.length > 0) {
+          let totalChars = 0;
+          const pages: IndexedPage[] = templatePages.map((tp) => {
+            totalChars += tp.text.length;
+            return {
+              docId,
+              docName,
+              shortName,
+              sourceType: 'drive',
+              pageNumber: tp.pageNumber,
+              text: tp.text,
+              lowerText: tp.lowerText,
+              webViewLink: file.webViewLink,
+              localPdfUrl: tp.localPdfUrl,
+            };
+          });
+          const result = {
+            meta: {
+              ...baseMeta,
+              status: 'indexed' as const,
+              pageCount: pages.length,
+              charCount: totalChars,
+              localPdfUrl: templatePages[0].localPdfUrl,
+            },
+            pages,
+          };
+          driveFileContentCache.set(cacheKey, result);
+          return result;
+        }
+      }
+
       if (sizeBytes && sizeBytes > 60 * 1024 * 1024) {
         return {
           meta: {
@@ -1066,9 +1115,19 @@ function tokenizeQuery(query: string): {
 
 function retrieveRelevantPages(
   query: string,
-  candidatePages: IndexedPage[],
+  rawCandidatePages: IndexedPage[],
   maxPages = 22,
 ): ScoredPage[] {
+  const seenContentKeys = new Set<string>();
+  const candidatePages: IndexedPage[] = [];
+  for (const p of rawCandidatePages) {
+    const contentKey = `${p.pageNumber}:${p.lowerText.slice(0, 140)}`;
+    if (!seenContentKeys.has(contentKey)) {
+      seenContentKeys.add(contentKey);
+      candidatePages.push(p);
+    }
+  }
+
   const { terms, phrases, codeTokens, refTokens } = tokenizeQuery(query);
   if (terms.length === 0 && refTokens.length === 0) {
     return candidatePages.slice(0, maxPages).map((page) => ({

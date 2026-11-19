@@ -449,3 +449,90 @@ export async function askManualFallback(
     bundledDocsCount: docs.length,
   };
 }
+
+export async function syncDriveFolderClientFallback(
+  folderId: string,
+  accessToken: string,
+): Promise<{
+  folderId: string;
+  folderName: string;
+  folderUrl: string;
+  syncedAt: string;
+  docs: IndexedDocumentMeta[];
+}> {
+  const { pages: bundledPages } = await loadStaticManualIndex();
+  const params = new URLSearchParams({
+    q: `'${folderId}' in parents and trashed = false`,
+    fields: 'files(id,name,mimeType,size,modifiedTime,webViewLink)',
+    pageSize: '100',
+    supportsAllDrives: 'true',
+    includeItemsFromAllDrives: 'true',
+    orderBy: 'folder,name',
+  });
+
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?${params.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Google Drive API error (${res.status})`);
+  }
+  const data = (await res.json()) as {
+    files?: Array<{
+      id: string;
+      name: string;
+      mimeType: string;
+      size?: string;
+      modifiedTime?: string;
+      webViewLink?: string;
+    }>;
+  };
+
+  const docs: IndexedDocumentMeta[] = [];
+  for (const file of data.files ?? []) {
+    const sizeBytes = file.size ? Number(file.size) : undefined;
+    const lowerName = file.name.toLowerCase();
+    const isPart1 =
+      sizeBytes === 6028085 ||
+      (lowerName.includes('cbs') && /part[\s_-]*1\b|part[\s_-]*i\b/.test(lowerName));
+    const isPart2 =
+      sizeBytes === 14312184 ||
+      (lowerName.includes('cbs') && /part[\s_-]*2\b|part[\s_-]*ii\b/.test(lowerName));
+    const matchedBundledId = isPart1
+      ? 'bundled-part-1'
+      : isPart2
+        ? 'bundled-part-2'
+        : null;
+    const matchedPages = matchedBundledId
+      ? bundledPages.filter((p) => p.docId === matchedBundledId)
+      : [];
+
+    docs.push({
+      docId: matchedBundledId || `drive-${file.id}`,
+      docName: file.name,
+      shortName: file.name,
+      sourceType: 'drive',
+      mimeType: file.mimeType,
+      pageCount:
+        matchedPages.length ||
+        (file.mimeType === 'application/pdf' ? 1 : 1),
+      charCount: matchedPages.reduce((sum, p) => sum + p.text.length, 0),
+      status: 'indexed',
+      modifiedTime: file.modifiedTime,
+      sizeBytes,
+      webViewLink: file.webViewLink,
+      localPdfUrl: matchedPages[0]?.localPdfUrl,
+    });
+  }
+
+  return {
+    folderId,
+    folderName: 'CBS Manual Google Drive Folder',
+    folderUrl: `https://drive.google.com/drive/folders/${folderId}`,
+    syncedAt: new Date().toISOString(),
+    docs,
+  };
+}
+

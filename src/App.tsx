@@ -4,6 +4,7 @@ import {
   BookOpen,
   Check,
   Copy,
+  FileDown,
   FileText,
   Menu,
   MessageSquare,
@@ -16,13 +17,26 @@ import { SearchPanel } from './components/SearchPanel';
 import { SidebarSources } from './components/SidebarSources';
 import { SourceInspectorModal } from './components/SourceInspectorModal';
 import {
+  clearAccessToken,
+  googleSignIn,
+  initAuth,
+  logout,
+} from './lib/auth';
+import {
+  downloadAnswerAsDoc,
+  downloadAnswerAsPdf,
+  shareAnswerPdfOnWhatsApp,
+} from './lib/exportAnswer';
+import {
   askManualFallback,
   getPageFallback,
   loadStaticManualIndex,
+  syncDriveFolderClientFallback,
 } from './lib/localManualFallback';
 import type {
   ChatMessage,
   Citation,
+  DriveFolderInfo,
   IndexedDocumentMeta,
   InspectedPage,
 } from './types';
@@ -64,7 +78,14 @@ const STARTER_PROMPTS = [
 
 export default function App() {
   const [bundledDocs, setBundledDocs] = useState<IndexedDocumentMeta[]>([]);
+  const [driveFolder, setDriveFolder] = useState<DriveFolderInfo | null>(null);
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
+
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isSyncingDrive, setIsSyncingDrive] = useState(false);
+  const [driveError, setDriveError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<'assistant' | 'search'>('assistant');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -73,23 +94,39 @@ export default function App() {
   const [inputValue, setInputValue] = useState('');
   const [isAsking, setIsAsking] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [waStatus, setWaStatus] = useState<{ id: string; text: string } | null>(
+    null,
+  );
 
   const [inspectedPage, setInspectedPage] = useState<InspectedPage | null>(null);
   const [isLoadingPage, setIsLoadingPage] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
-  const fetchSources = useCallback(async () => {
+  const fetchSources = useCallback(async (token?: string | null) => {
     try {
-      const res = await fetch('/api/sources');
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+      const res = await fetch(
+        `/api/sources?folderId=${encodeURIComponent(DEFAULT_FOLDER_ID)}`,
+        { headers },
+      );
       if (!res.ok) {
         throw new Error(`Status ${res.status}`);
       }
       const data = (await res.json()) as {
         bundledDocs?: IndexedDocumentMeta[];
+        driveFolder?: DriveFolderInfo | null;
       };
       if (data.bundledDocs && data.bundledDocs.length > 0) {
         setBundledDocs(data.bundledDocs);
+      }
+      if (data.driveFolder) {
+        setDriveFolder(data.driveFolder);
+      }
+      if (data.bundledDocs && data.bundledDocs.length > 0) {
         return;
       }
     } catch {
@@ -105,22 +142,116 @@ export default function App() {
     }
   }, []);
 
+  const syncDriveFiles = useCallback(async (token: string) => {
+    setIsSyncingDrive(true);
+    setDriveError(null);
+    try {
+      const res = await fetch('/api/drive/sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          folderInput: DEFAULT_FOLDER_ID,
+          folderInputs: [DEFAULT_FOLDER_ID],
+        }),
+      });
+      const data = (await res.json()) as DriveFolderInfo & { error?: string };
+      if (!res.ok) {
+        if (res.status === 401) {
+          clearAccessToken();
+          setAccessToken(null);
+        }
+        throw new Error(data.error || 'Could not sync Google Drive folder.');
+      }
+      setDriveFolder({
+        folderId: data.folderId,
+        folderName: data.folderName,
+        folderUrl: data.folderUrl,
+        syncedAt: data.syncedAt,
+        docs: data.docs || [],
+      });
+    } catch (err) {
+      try {
+        const clientSynced = await syncDriveFolderClientFallback(
+          DEFAULT_FOLDER_ID,
+          token,
+        );
+        setDriveFolder(clientSynced);
+        setDriveError(null);
+      } catch {
+        setDriveError(
+          err instanceof Error
+            ? err.message
+            : 'Unable to load files from Google Drive folder.',
+        );
+      }
+    } finally {
+      setIsSyncingDrive(false);
+    }
+  }, []);
+
   useEffect(() => {
-    fetchSources();
-  }, [fetchSources]);
+    fetchSources(accessToken);
+  }, [fetchSources, accessToken]);
+
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setUserEmail(user.email);
+        setAccessToken(token);
+        syncDriveFiles(token);
+      },
+      (user) => {
+        setUserEmail(user?.email ?? null);
+        setAccessToken(null);
+      },
+    );
+    return () => unsubscribe();
+  }, [syncDriveFiles]);
 
   // Poll briefly if bundled manuals are still indexing on very first boot
   useEffect(() => {
     if (bundledDocs.length >= 2) return;
     const timer = setTimeout(() => {
-      fetchSources();
+      fetchSources(accessToken);
     }, 2000);
     return () => clearTimeout(timer);
-  }, [bundledDocs.length, fetchSources]);
+  }, [bundledDocs.length, fetchSources, accessToken]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  const handleGoogleSignIn = async () => {
+    setIsSigningIn(true);
+    setDriveError(null);
+    try {
+      const result = await googleSignIn();
+      if (result) {
+        setUserEmail(result.user.email);
+        setAccessToken(result.accessToken);
+        await syncDriveFiles(result.accessToken);
+      }
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Google login was cancelled or failed.';
+      if (!msg.toLowerCase().includes('popup-closed-by-user')) {
+        setDriveError(msg);
+      }
+    } finally {
+      setIsSigningIn(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await logout();
+    setUserEmail(null);
+    setAccessToken(null);
+    setDriveFolder(null);
+    setDriveError(null);
+  };
 
   const handleToggleDocSelection = (docId: string) => {
     setSelectedDocIds((prev) =>
@@ -138,9 +269,14 @@ export default function App() {
       const params = new URLSearchParams({
         docId,
         page: String(pageNumber),
+        folderId: DEFAULT_FOLDER_ID,
       });
+      const headers: Record<string, string> = {};
+      if (accessToken) {
+        headers.Authorization = `Bearer ${accessToken}`;
+      }
 
-      const res = await fetch(`/api/page?${params.toString()}`);
+      const res = await fetch(`/api/page?${params.toString()}`, { headers });
       const data = (await res.json()) as InspectedPage & { error?: string };
       if (!res.ok) {
         throw new Error(data.error || 'Could not load manual page.');
@@ -196,15 +332,22 @@ export default function App() {
     ]);
 
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (accessToken) {
+        headers.Authorization = `Bearer ${accessToken}`;
+      }
+
       const res = await fetch('/api/ask', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({
           question,
           history: historyPayload,
-          sourceScope: 'bundled',
+          folderId: DEFAULT_FOLDER_ID,
+          folderInputs: [DEFAULT_FOLDER_ID],
+          sourceScope: accessToken ? 'all' : 'bundled',
           selectedDocIds,
         }),
       });
@@ -266,7 +409,10 @@ export default function App() {
                       ? {
                           ...m,
                           citations: payload.citations,
+                          driveConnected: payload.driveConnected,
+                          driveDocsCount: payload.driveDocsCount,
                           bundledDocsCount: payload.bundledDocsCount,
+                          driveSyncWarning: payload.driveSyncWarning,
                         }
                       : m,
                   ),
@@ -338,17 +484,27 @@ export default function App() {
   };
 
   const totalBundledPages = bundledDocs.reduce((acc, d) => acc + d.pageCount, 0);
+  const driveDocsCount = driveFolder?.docs.length ?? 0;
 
   return (
     <div className="h-dvh w-full overflow-hidden flex bg-[#FAF7F2] text-slate-900">
       {/* Desktop Sidebar */}
-      <div className="hidden lg:block w-[280px] shrink-0 h-full">
+      <div className="hidden lg:block w-[290px] shrink-0 h-full">
         <SidebarSources
           bundledDocs={bundledDocs}
+          driveFolder={driveFolder}
           selectedDocIds={selectedDocIds}
           onToggleDocSelection={handleToggleDocSelection}
           onSelectSingleDoc={(docId) => setSelectedDocIds([docId])}
           onClearDocSelection={() => setSelectedDocIds([])}
+          userEmail={userEmail}
+          hasDriveToken={Boolean(accessToken)}
+          isSigningIn={isSigningIn}
+          isSyncingDrive={isSyncingDrive}
+          driveError={driveError}
+          onGoogleSignIn={handleGoogleSignIn}
+          onSignOut={handleSignOut}
+          onSyncDrive={() => accessToken && syncDriveFiles(accessToken)}
         />
       </div>
 
@@ -364,10 +520,19 @@ export default function App() {
           >
             <SidebarSources
               bundledDocs={bundledDocs}
+              driveFolder={driveFolder}
               selectedDocIds={selectedDocIds}
               onToggleDocSelection={handleToggleDocSelection}
               onSelectSingleDoc={(docId) => setSelectedDocIds([docId])}
               onClearDocSelection={() => setSelectedDocIds([])}
+              userEmail={userEmail}
+              hasDriveToken={Boolean(accessToken)}
+              isSigningIn={isSigningIn}
+              isSyncingDrive={isSyncingDrive}
+              driveError={driveError}
+              onGoogleSignIn={handleGoogleSignIn}
+              onSignOut={handleSignOut}
+              onSyncDrive={() => accessToken && syncDriveFiles(accessToken)}
               onCloseMobile={() => setMobileSidebarOpen(false)}
             />
           </div>
@@ -398,7 +563,10 @@ export default function App() {
                   <span className="hidden sm:inline">CBS Manual AI Assistant</span>
                 </h1>
                 <p className="text-[11px] text-red-100 truncate tabular-nums hidden sm:block">
-                  India Post POSB 2026 · {totalBundledPages || 748} pages saved &amp; ready
+                  India Post POSB 2026 · {totalBundledPages || 748} pages
+                  {driveDocsCount > 0
+                    ? ` + ${driveDocsCount} folder file${driveDocsCount === 1 ? '' : 's'} synced`
+                    : ' saved & ready'}
                 </p>
               </div>
             </div>
@@ -453,8 +621,8 @@ export default function App() {
         {activeTab === 'search' ? (
           <SearchPanel
             folderId={DEFAULT_FOLDER_ID}
-            sourceScope="bundled"
-            accessToken={null}
+            sourceScope={accessToken ? 'all' : 'bundled'}
+            accessToken={accessToken}
             onInspectHit={(docId, pageNumber, q) =>
               openPageInspector(docId, pageNumber, q)
             }
@@ -476,7 +644,7 @@ export default function App() {
                         Ask any rule, Finacle menu code, or POSB procedure
                       </h2>
                       <p className="text-sm text-slate-600 leading-relaxed max-w-2xl">
-                        All 748 pages of POSB CBS Manual 2026 Part I (Chapters 1–22) and Part II (Appendices I–XXIX) are permanently saved inside this tool for immediate answers.
+                        All 748 pages of POSB CBS Manual 2026 Part I (Chapters 1–22) and Part II (Appendices I–XXIX) are permanently saved inside this tool. Open the menu to <strong>Login to Google</strong> and search across every file in your linked folder.
                       </p>
                     </div>
 
@@ -506,7 +674,14 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-4 sm:space-y-6 pb-4">
-                    {messages.map((msg) => (
+                    {messages.map((msg, msgIndex) => {
+                      const relatedQuestion =
+                        msg.role === 'assistant'
+                          ? ([...messages.slice(0, msgIndex)]
+                              .reverse()
+                              .find((m) => m.role === 'user')?.content ?? '')
+                          : '';
+                      return (
                       <div key={msg.id} className="min-w-0">
                         {msg.role === 'user' ? (
                           <div className="flex justify-end">
@@ -516,29 +691,97 @@ export default function App() {
                           </div>
                         ) : (
                           <div className="bg-white border border-[#E8DFD5] rounded-lg p-3.5 sm:p-5 space-y-4 min-w-0">
-                            <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-[#F2EAE0]">
+                            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#F2EAE0]">
                               <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
                                 <BookOpen className="w-3.5 h-3.5 text-[#C8102E]" />
                                 <span>CBS Manual Reference Answer</span>
                               </div>
                               {!msg.isStreaming && msg.content && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleCopy(msg.id, msg.content)}
-                                  className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 hover:text-slate-900 whitespace-nowrap"
-                                >
-                                  {copiedId === msg.id ? (
-                                    <>
-                                      <Check className="w-3.5 h-3.5 text-emerald-600" />
-                                      <span>Copied</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="w-3.5 h-3.5" />
-                                      <span>Copy</span>
-                                    </>
-                                  )}
-                                </button>
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      downloadAnswerAsPdf({
+                                        question: relatedQuestion,
+                                        answer: msg.content,
+                                        citations: msg.citations,
+                                      })
+                                    }
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-red-200 bg-red-50/70 hover:bg-red-100 text-[11px] font-medium text-[#991B1B] transition-colors whitespace-nowrap"
+                                    title="Download answer as PDF"
+                                  >
+                                    <FileDown className="w-3.5 h-3.5" />
+                                    <span className="hidden sm:inline">Download PDF</span>
+                                    <span className="sm:hidden">PDF</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      downloadAnswerAsDoc({
+                                        question: relatedQuestion,
+                                        answer: msg.content,
+                                        citations: msg.citations,
+                                      })
+                                    }
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[#E2D8CB] bg-[#FAF7F2] hover:bg-[#FFF8DB] text-[11px] font-medium text-slate-800 transition-colors whitespace-nowrap"
+                                    title="Download answer as Word DOC file"
+                                  >
+                                    <FileText className="w-3.5 h-3.5 text-[#B45309]" />
+                                    <span className="hidden sm:inline">Download DOC</span>
+                                    <span className="sm:hidden">DOC</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const result = await shareAnswerPdfOnWhatsApp({
+                                        question: relatedQuestion,
+                                        answer: msg.content,
+                                        citations: msg.citations,
+                                      });
+                                      if (result === 'shared') {
+                                        setWaStatus({ id: msg.id, text: 'Sent' });
+                                        setTimeout(() => setWaStatus(null), 2200);
+                                      } else if (result === 'downloaded-and-opened') {
+                                        setWaStatus({ id: msg.id, text: 'PDF Ready' });
+                                        setTimeout(() => setWaStatus(null), 2600);
+                                      }
+                                    }}
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-[11px] font-medium text-emerald-800 transition-colors whitespace-nowrap"
+                                    title="Send PDF directly on WhatsApp"
+                                  >
+                                    <svg
+                                      viewBox="0 0 24 24"
+                                      fill="currentColor"
+                                      className="w-3.5 h-3.5 text-[#16A34A] shrink-0"
+                                      aria-hidden="true"
+                                    >
+                                      <path d="M12.031 2C6.508 2 2.016 6.492 2.016 12.015c0 1.766.461 3.49 1.337 5.012L2 22l5.107-1.339a9.97 9.97 0 0 0 4.924 1.298h.004c5.522 0 10.015-4.492 10.015-10.015A9.953 9.953 0 0 0 19.12 4.914 9.95 9.95 0 0 0 12.031 2zm5.825 14.156c-.246.693-1.441 1.325-1.99 1.406-.508.075-1.168.107-1.884-.12-.435-.138-.993-.323-1.71-.633-3.008-1.298-4.972-4.33-5.122-4.53-.15-.2-1.224-1.63-1.224-3.109 0-1.479.775-2.206 1.05-2.507.275-.3.6-.375.8-.375.2 0 .4.002.575.01.184.009.431-.07.674.515.25.6.85 2.078.925 2.228.075.15.125.325.025.525-.1.2-.15.325-.3.5-.15.175-.316.391-.45.525-.15.15-.307.313-.132.613.175.3.778 1.284 1.67 2.08 1.148 1.023 2.115 1.34 2.415 1.49.3.15.475.125.65-.075.175-.2.75-.875.95-1.175.2-.3.4-.25.675-.15.275.1 1.748.825 2.048.975.3.15.5.225.575.35.075.125.075.725-.171 1.418z" />
+                                    </svg>
+                                    <span>
+                                      {waStatus?.id === msg.id
+                                        ? waStatus.text
+                                        : 'WhatsApp'}
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopy(msg.id, msg.content)}
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-transparent hover:border-[#E8DFD5] hover:bg-[#FAF7F2] text-[11px] font-medium text-slate-600 hover:text-slate-900 transition-colors whitespace-nowrap"
+                                    title="Copy answer text"
+                                  >
+                                    {copiedId === msg.id ? (
+                                      <>
+                                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                        <span>Copied</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Copy className="w-3.5 h-3.5" />
+                                        <span>Copy</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
                               )}
                             </div>
 
@@ -585,7 +828,7 @@ export default function App() {
                                 <div className="text-xs font-medium text-[#C8102E]">
                                   {msg.citations && msg.citations.length > 0
                                     ? `Matched ${msg.citations.length} manual pages — generating answer...`
-                                    : 'Searching saved CBS Manual 2026...'}
+                                    : 'Searching all CBS Manual & folder files...'}
                                 </div>
                                 <div className="h-3.5 bg-stone-200/80 rounded w-3/4 animate-pulse" />
                                 <div className="h-3.5 bg-stone-200/80 rounded w-5/6 animate-pulse" />
@@ -633,7 +876,8 @@ export default function App() {
                           </div>
                         )}
                       </div>
-                    ))}
+                      );
+                    })}
                     <div ref={chatEndRef} />
                   </div>
                 )}
@@ -641,7 +885,7 @@ export default function App() {
             </div>
 
             {/* Bottom Composer */}
-            <div className="shrink-0 bg-white border-t border-[#E8DFD5] px-3 sm:px-8 pt-2.5 pb-safe">
+            <div className="shrink-0 bg-white border-t border-[#E8DFD5] px-3 sm:px-8 pt-2.5 pb-2">
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -660,7 +904,7 @@ export default function App() {
                         handleAsk();
                       }
                     }}
-                    placeholder="Ask about CBS Manual 2026, Finacle menus..."
+                    placeholder="Ask about CBS Manual 2026, Finacle menus, or folder files..."
                     className="flex-1 resize-none bg-transparent text-base sm:text-sm text-slate-900 placeholder:text-slate-400 px-2 py-1.5 focus:outline-none max-h-36"
                   />
                   <button
@@ -679,8 +923,14 @@ export default function App() {
                       {selectedDocIds.length === 1
                         ? selectedDocIds[0].includes('part-1')
                           ? 'CBS Manual 2026 Part I'
-                          : 'CBS Manual 2026 Part II'
-                        : 'CBS Manual 2026 (Part I & II)'}
+                          : selectedDocIds[0].includes('part-2')
+                            ? 'CBS Manual 2026 Part II'
+                            : '1 Selected File'
+                        : selectedDocIds.length > 1
+                          ? `${selectedDocIds.length} Selected Files`
+                          : driveDocsCount > 0
+                            ? `All Files (CBS Manual Part I & II + ${driveDocsCount} Folder Files)`
+                            : 'CBS Manual 2026 (Part I & II)'}
                     </strong>
                   </span>
                   <span className="hidden sm:inline shrink-0">
@@ -691,6 +941,11 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* Attribution Footer */}
+        <footer className="shrink-0 bg-[#F6F1EA] border-t border-[#E6DDD1] px-3 sm:px-6 py-1.5 pb-safe text-center text-[11px] text-slate-600 font-medium">
+          Prepared by Kalandi Charan Sahoo, PA, Dhenkanal RS SO
+        </footer>
       </div>
 
       {/* Source Inspector Drawer/Modal */}
